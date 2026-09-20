@@ -34,8 +34,9 @@ release version:
     major="v$(cut -d. -f1 <<< "{{ version }}")"
     git fetch --quiet origin main
     [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "HEAD is not origin/main" >&2; exit 1; }
-    git tag "v{{ version }}"
-    git tag --force "$major"
+    # Annotated, so that a `tag.gpgSign` setup can sign them: a signed tag needs a message.
+    git tag --message "v{{ version }}" "v{{ version }}"
+    git tag --force --message "$major -> v{{ version }}" "$major"
     git push origin "v{{ version }}"
     git push --force origin "$major"
     echo "v{{ version }} released; $major now points at $(git rev-parse --short HEAD)"
