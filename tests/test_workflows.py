@@ -99,6 +99,15 @@ def test_triage_takes_the_module_from_the_callers_variable() -> None:
     ]
 
 
+def test_triage_takes_the_project_owner_from_the_event() -> None:
+    # actions/add-to-project compares the URL's owner case-sensitively with the item's owner and on a mismatch adds
+    # a draft issue instead, which fails for an item that is already on the board. Only the event's own spelling of
+    # the owner survives a change of the org login's case.
+    assert [line.strip() for line in _lines(TRIAGE) if line.lstrip().startswith("PROJECT_URL:")] == [
+        "PROJECT_URL: https://github.com/orgs/${{ github.event.repository.owner.login }}/projects/2"
+    ]
+
+
 def test_deploy_checks_out_nothing_but_its_own_ref() -> None:
     lines = _lines(DEPLOY)
     checkouts = [i for i, line in enumerate(lines) if "actions/checkout" in line]

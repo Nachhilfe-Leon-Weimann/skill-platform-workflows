@@ -19,7 +19,10 @@ on:
 permissions: {}
 
 env:
-  PROJECT_URL: https://github.com/orgs/Nachhilfe-Leon-Weimann/projects/2
+  # The org that owns the calling repo, spelled as the event spells it: actions/add-to-project compares this owner
+  # case-sensitively with the item's owner and on a mismatch adds a draft issue instead - which fails with "Content
+  # already exists in this project" for an item that is already on the board.
+  PROJECT_URL: https://github.com/orgs/${{ github.event.repository.owner.login }}/projects/2
   # The calling repo's option of the project's single-select field "Module" (forge, site, bot).
   MODULE: ${{ vars.PROJECT_MODULE }}
 
