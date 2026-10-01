@@ -31,8 +31,8 @@ tests/               test_deploy_dokploy.py (the script against a fake Dokploy),
 - **Pin every action by full SHA with a version comment**; Dependabot keeps them current.
 - **`triage.yml` never checks out code and never puts `${{ ... }}` into a `run:` block** - its callers run on
   `pull_request_target` with the App key. Event data reaches a script through `env:` only.
-- **`deploy.yml` checks out this repo at its own ref and nothing else**, and keeps its concurrency group on the
-  job. Never print or echo secrets; the Dokploy API key goes through a curl config file.
+- **`deploy.yml` checks out this repo at its own ref and nothing else** - the caller's `compose.yml` comes through
+  the API as data - and keeps its concurrency group on the job. Never print or echo secrets; the Dokploy API key goes through a curl config file.
 - **No rollback, digest pinning, attestations or notifications** - non-goals of the release flow, not omissions.
 - A shared workflow only has the `workflow_call` trigger; it cannot be tried in this repo. The tests are the
   safety net, a `dry_run` dispatch of a caller's `deploy.yml` is the live proof.

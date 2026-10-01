@@ -119,6 +119,15 @@ def test_deploy_checks_out_nothing_but_its_own_ref() -> None:
     assert "persist-credentials: false" in step
 
 
+def test_deploy_hands_dokploy_the_callers_compose_of_the_released_commit() -> None:
+    # Dokploy runs the compose it stores; only the released compose.yml may become that (skill-platform-workflows#5).
+    lines = [line.strip() for line in _lines(DEPLOY)]
+
+    assert "RELEASE_SHA: ${{ inputs.sha || github.sha }}" in lines
+    assert any('"repos/$REPOSITORY/contents/compose.yml?ref=$RELEASE_SHA"' in line for line in lines)
+    assert "COMPOSE_FILE: ${{ runner.temp }}/compose.yml" in lines
+
+
 def test_deploy_serializes_on_the_job_and_never_cancels() -> None:
     lines = _lines(DEPLOY)
 

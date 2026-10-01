@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -18,6 +19,18 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / ".github" / "scripts" / "deploy-dokploy.sh"
 API_KEY = "test-key-123"
+RELEASED_COMPOSE = """services:
+  app:
+    image: ghcr.io/example/app:v1.2.3 # x-release-please-version
+  worker:
+    image: ghcr.io/example/app:v1.2.3 # x-release-please-version
+    command: [ "python", "-m", "app.workers.housekeeping" ]
+"""
+STALE_COMPOSE = """services:
+  worker:
+    image: ghcr.io/example/app:latest
+    command: [ "python", "-m", "app.workers.reaper" ]
+"""
 
 # The module-level skip must not hide these tests in CI - only skip locally when a tool is missing.
 pytestmark = pytest.mark.skipif(
@@ -38,6 +51,12 @@ class FakeDokploy:
     deploy_started: bool = False
     # Listings to answer with a transient error once the deployment has started (the wait loop).
     transient_listing_errors: int = 0
+    # The compose Dokploy stores and runs - not the repo's, until a deploy replaces it.
+    compose_file: str = STALE_COMPOSE
+    source_type: str = "raw"
+    # Accept compose.update but keep the stored compose, as an API that dropped the field would.
+    ignore_compose_updates: bool = False
+    calls: list[str] = field(default_factory=list)
 
     def advance(self) -> None:
         """Each listing moves the new deployment one step closer to its final status."""
@@ -71,6 +90,7 @@ def _handler(state: FakeDokploy) -> type[BaseHTTPRequestHandler]:
 
         def do_GET(self) -> None:
             path = urlparse(self.path).path
+            state.calls.append(f"GET {path}")
             if path == "/health":
                 state.health_calls += 1
                 self._send(200, {"status": "ok", "version": state.health_version})
@@ -83,6 +103,10 @@ def _handler(state: FakeDokploy) -> type[BaseHTTPRequestHandler]:
                     return
                 state.advance()
                 self._send(200, state.deployments)
+            elif path == "/api/compose.one":
+                # Dokploy answers with the whole service, its env included - the script must never print it.
+                compose = {"composeFile": state.compose_file, "sourceType": state.source_type, "env": "SECRET=1"}
+                self._send(200, {"composeId": "compose-1", **compose})
             else:
                 self._send(404, {"message": "not found"})
 
@@ -91,7 +115,15 @@ def _handler(state: FakeDokploy) -> type[BaseHTTPRequestHandler]:
                 return
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
-            if urlparse(self.path).path != "/api/compose.deploy":
+            path = urlparse(self.path).path
+            state.calls.append(f"POST {path}")
+            if path == "/api/compose.update":
+                if not state.ignore_compose_updates:
+                    state.compose_file = payload["composeFile"]
+                    state.source_type = payload["sourceType"]
+                self._send(200, {"composeId": payload["composeId"]})
+                return
+            if path != "/api/compose.deploy":
                 self._send(404, {"message": "not found"})
                 return
             state.deploy_calls.append(payload)
@@ -115,7 +147,16 @@ def dokploy() -> Iterator[tuple[FakeDokploy, str]]:
         server.server_close()
 
 
-def _run(base_url: str, *, health: bool = True, **overrides: str) -> subprocess.CompletedProcess[str]:
+def _run(
+    base_url: str, *, health: bool = True, compose: str = RELEASED_COMPOSE, **overrides: str
+) -> subprocess.CompletedProcess[str]:
+    with tempfile.TemporaryDirectory() as directory:
+        compose_file = Path(directory) / "compose.yml"
+        compose_file.write_text(compose)
+        return _run_script(base_url, health=health, COMPOSE_FILE=str(compose_file), **overrides)
+
+
+def _run_script(base_url: str, *, health: bool, **overrides: str) -> subprocess.CompletedProcess[str]:
     env = {
         "PATH": os.environ["PATH"],
         "DOKPLOY_BASE_URL": base_url,
@@ -229,6 +270,64 @@ def test_dry_run_only_reads(dokploy):
 
     assert result.returncode == 0, result.stderr
     assert state.deploy_calls == []
+    assert [call for call in state.calls if call.startswith("POST")] == []
+    assert state.compose_file == STALE_COMPOSE
+    assert "stores another compose file (source raw)" in result.stdout
+
+
+def test_dry_run_reports_a_stored_compose_that_is_already_the_released_one(dokploy):
+    state, base_url = dokploy
+    state.compose_file = RELEASED_COMPOSE + "\n"
+
+    result = _run(base_url, DRY_RUN="true")
+
+    assert result.returncode == 0, result.stderr
+    assert "stores the released compose file" in result.stdout
+
+
+def test_stores_the_released_compose_before_it_deploys(dokploy):
+    state, base_url = dokploy
+    state.source_type = "github"
+
+    result = _run(base_url)
+
+    assert result.returncode == 0, result.stderr
+    assert state.compose_file == RELEASED_COMPOSE
+    assert state.source_type == "raw"
+    posts = [call for call in state.calls if call.startswith("POST")]
+    assert posts == ["POST /api/compose.update", "POST /api/compose.deploy"]
+    assert "SECRET=1" not in result.stdout + result.stderr
+
+
+def test_a_compose_dokploy_did_not_store_stops_before_the_deploy(dokploy):
+    state, base_url = dokploy
+    state.ignore_compose_updates = True
+
+    result = _run(base_url)
+
+    assert result.returncode != 0
+    assert "did not store the released compose file" in result.stderr
+    assert state.deploy_calls == []
+
+
+@pytest.mark.parametrize(
+    "compose",
+    [
+        STALE_COMPOSE,
+        RELEASED_COMPOSE.replace("v1.2.3", "v1.2.2"),
+        RELEASED_COMPOSE.replace(":v1.2.3", ":v1.2.3-rc.1"),
+        "",
+    ],
+    ids=["latest", "older-version", "other-prerelease", "empty"],
+)
+def test_a_compose_without_the_released_image_is_refused_before_any_call(dokploy, compose):
+    state, base_url = dokploy
+
+    result = _run(base_url, compose=compose)
+
+    assert result.returncode != 0
+    assert "COMPOSE_FILE" in result.stderr
+    assert state.calls == []
 
 
 def test_a_wrong_api_key_is_reported(dokploy):

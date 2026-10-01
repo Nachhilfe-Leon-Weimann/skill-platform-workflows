@@ -6,7 +6,7 @@ lands in all of them at once.
 
 | Workflow | What it does | Decision record |
 |---|---|---|
-| [`deploy.yml`](.github/workflows/deploy.yml) | Deploys a Dokploy compose service through the Dokploy API, waits for the deployment to end and verifies the running version. The only code that talks to Dokploy ([`deploy-dokploy.sh`](.github/scripts/deploy-dokploy.sh)). | [`release-flow.md`](https://github.com/Nachhilfe-Leon-Weimann/skillforge/blob/main/docs/specs/release-flow.md) |
+| [`deploy.yml`](.github/workflows/deploy.yml) | Stores the released `compose.yml` in a Dokploy compose service, deploys it through the Dokploy API, waits for the deployment to end and verifies the running version. The only code that talks to Dokploy ([`deploy-dokploy.sh`](.github/scripts/deploy-dokploy.sh)). | [`release-flow.md`](https://github.com/Nachhilfe-Leon-Weimann/skillforge/blob/main/docs/specs/release-flow.md) |
 | [`triage.yml`](.github/workflows/triage.yml) | Puts every issue and PR on the org project with its Module, assigns the author, moves a closed item into the current iteration, asks for a missing issue type. | [`project-intake.md`](https://github.com/Nachhilfe-Leon-Weimann/skillforge/blob/main/docs/specs/project-intake.md) |
 
 The specs live in skillforge, the first adopter; they carry the *why*. This repo is public because a public
@@ -67,6 +67,7 @@ Configuration, all of it in the **calling** repo:
 
 | Where | Name | Value |
 |---|---|---|
+| Repo root | `compose.yml` | the service's compose; at least one `image:` carries the release tag `vX.Y.Z` (release-please's annotated `image:` lines). Every deploy stores it in Dokploy as raw source, so an edit in Dokploy's UI lasts only until the next deploy |
 | Org variable | `DOKPLOY_BASE_URL` | the Dokploy instance, HTTPS |
 | Environment `production`, secret | `DOKPLOY_API_KEY` | API key of the deploying Dokploy user |
 | Environment `production`, variable | `DOKPLOY_COMPOSE_ID` | id of the compose service |
@@ -74,7 +75,9 @@ Configuration, all of it in the **calling** repo:
 
 The environment's deployment branches are restricted to `main`, and the job skips every other ref. The job runs
 the deploy script of the ref it was called at (`job.workflow_repository` / `job.workflow_sha`), never code of
-the calling repo. It does not roll back: a failed deployment or a wrong version is a red run.
+the calling repo; the caller's `compose.yml` of the released commit comes through the GitHub API as data, read
+with the caller's token (`contents: read`). It does not roll back: a failed deployment or a wrong version is a
+red run.
 
 ## Calling `triage.yml`
 
