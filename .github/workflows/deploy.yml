@@ -1,11 +1,13 @@
 name: Deploy
 
-# The platform's one deploy (skillforge: docs/specs/release-flow.md, decision H): Dokploy API compose.deploy,
-# wait for the deployment to end, then verify the running version. The only code that talks to Dokploy.
+# The platform's one deploy (skillforge: docs/specs/release-flow.md, decision H): store the released compose.yml
+# in Dokploy (compose.update), Dokploy API compose.deploy, wait for the deployment to end, then verify the running
+# version. The only code that talks to Dokploy.
 #
-# Called by each repo's deploy.yml. Everything repo-specific is configuration of the *calling* repo: the
-# `production` environment (secret DOKPLOY_API_KEY, variables DOKPLOY_COMPOSE_ID and HEALTH_URL - empty for a
-# service without HTTP) and the org variable DOKPLOY_BASE_URL. The caller passes `secrets: inherit`.
+# Called by each repo's deploy.yml. Everything repo-specific is configuration of the *calling* repo: its
+# compose.yml at the repo root, the `production` environment (secret DOKPLOY_API_KEY, variables DOKPLOY_COMPOSE_ID
+# and HEALTH_URL - empty for a service without HTTP) and the org variable DOKPLOY_BASE_URL. The caller passes
+# `secrets: inherit` and grants `contents: read`.
 
 on:
   workflow_call:
@@ -51,6 +53,17 @@ jobs:
           ref: ${{ job.workflow_sha }}
           persist-credentials: false
 
+      # Dokploy runs the compose it stores, so the deploy hands it the caller's compose.yml of the released commit.
+      # Read through the API as data, never checked out: no code of the calling repo runs beside the API key.
+      - name: Fetch the released compose file
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_SHA: ${{ inputs.sha || github.sha }}
+        run: |
+          gh api --header "Accept: application/vnd.github.raw" \
+            "repos/$REPOSITORY/contents/compose.yml?ref=$RELEASE_SHA" > "$RUNNER_TEMP/compose.yml"
+
       - name: Deploy and verify
         env:
           DOKPLOY_BASE_URL: ${{ vars.DOKPLOY_BASE_URL }}
@@ -59,5 +72,6 @@ jobs:
           HEALTH_URL: ${{ vars.HEALTH_URL }}
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_SHA: ${{ inputs.sha || github.sha }}
+          COMPOSE_FILE: ${{ runner.temp }}/compose.yml
           DRY_RUN: ${{ inputs.dry_run }}
         run: .github/scripts/deploy-dokploy.sh

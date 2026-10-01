@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Deploys a Dokploy compose service through the Dokploy API and verifies the result:
-# trigger compose.deploy, wait until the new deployment is done, then expect HEALTH_URL to answer
-# with status "ok" and the released version. No rollback by design (skillforge: docs/specs/release-flow.md).
+# store the released compose file (COMPOSE_FILE) as the service's compose, trigger compose.deploy, wait until
+# the new deployment is done, then expect HEALTH_URL to answer with status "ok" and the released version.
+# No rollback by design (skillforge: docs/specs/release-flow.md).
 set -euo pipefail
 
 die()
@@ -13,7 +14,7 @@ die()
 for tool in curl jq; do
 	command -v "$tool" > /dev/null || die "$tool is required"
 done
-for name in DOKPLOY_BASE_URL DOKPLOY_API_KEY DOKPLOY_COMPOSE_ID RELEASE_VERSION; do
+for name in DOKPLOY_BASE_URL DOKPLOY_API_KEY DOKPLOY_COMPOSE_ID RELEASE_VERSION COMPOSE_FILE; do
 	[ -n "${!name:-}" ] || die "$name is required"
 done
 
@@ -40,6 +41,18 @@ done
 	|| die "timeouts must be positive integers"
 [[ "$POLL_INTERVAL" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "DOKPLOY_POLL_INTERVAL_SECONDS must be a number"
 [ "$DRY_RUN" = true ] || [ "$DRY_RUN" = false ] || die "DRY_RUN must be true or false"
+
+# The released compose file pins its images to the release (release-please rewrites the annotated `image:`
+# lines). One that does not - a stale `:latest`, another version - would deploy something else than was released.
+[ -s "$COMPOSE_FILE" ] || die "COMPOSE_FILE $COMPOSE_FILE is missing or empty"
+release_image_found=false
+while IFS= read -r line; do
+	if [[ "$line" =~ ^[[:space:]]*image:[[:space:]]*[^[:space:]#]+:v([^[:space:]#]+) ]] \
+		&& [ "${BASH_REMATCH[1]}" = "$RELEASE_VERSION" ]; then
+		release_image_found=true
+	fi
+done < "$COMPOSE_FILE"
+[ "$release_image_found" = true ] || die "COMPOSE_FILE has no image tagged v$RELEASE_VERSION"
 
 WORK_DIR=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/dokploy-deploy.XXXXXX")
 trap 'rm -rf -- "$WORK_DIR"' EXIT
@@ -99,10 +112,37 @@ BEFORE=$WORK_DIR/before.json
 list_deployments "$BEFORE"
 [ "$(jq -r '.[0].status // empty' "$BEFORE")" != running ] || die "another Dokploy deployment is already running"
 
+# stored_compose_matches FILE - whether the compose service's stored compose (compose.one, in FILE) is the
+# released one, as raw source. Trailing newlines do not count.
+stored_compose_matches()
+{
+	jq -e --rawfile released "$COMPOSE_FILE" \
+		'.sourceType == "raw" and ((.composeFile // "") | sub("\n+$"; "")) == ($released | sub("\n+$"; ""))' \
+		"$1" > /dev/null
+}
+
+STORED=$WORK_DIR/stored.json
+api GET "compose.one?composeId=$DOKPLOY_COMPOSE_ID" "$STORED"
+
 if [ "$DRY_RUN" = true ]; then
-	echo "dry run: Dokploy API access and the compose service's deployment list verified; nothing deployed"
+	if stored_compose_matches "$STORED"; then
+		echo "dry run: Dokploy stores the released compose file"
+	else
+		echo "dry run: Dokploy stores another compose file (source $(jq -r '.sourceType // "unknown"' "$STORED")); a deploy replaces it"
+	fi
+	echo "dry run: Dokploy API access, the stored compose and the deployment list verified; nothing deployed"
 	exit 0
 fi
+
+# Dokploy runs the compose it stores, not the repo's: without this step a stale copy - an old worker module,
+# a `:latest` image - is what runs (skill-platform-workflows#5). The repo's compose.yml is the only source.
+UPDATE=$WORK_DIR/update.json
+jq -n --arg composeId "$DOKPLOY_COMPOSE_ID" --rawfile composeFile "$COMPOSE_FILE" \
+	'{composeId: $composeId, sourceType: "raw", composeFile: $composeFile}' > "$UPDATE"
+api POST compose.update "$WORK_DIR/update-response.json" "$UPDATE"
+api GET "compose.one?composeId=$DOKPLOY_COMPOSE_ID" "$STORED"
+stored_compose_matches "$STORED" || die "Dokploy did not store the released compose file"
+echo "Dokploy stores the released compose file of v$RELEASE_VERSION"
 
 PAYLOAD=$WORK_DIR/deploy.json
 jq -n \
